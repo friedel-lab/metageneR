@@ -1,0 +1,18 @@
+{
+  "bin_genome": {
+    "input_dir": "path/to/bedgraphs",
+    "strand": 1,
+    "annotation": "path/to/annotation.bed",
+    "output_dir": "path/to/output",
+    "strand_pattern": "Plus/Minus",
+    "bins": 200,
+    "grep_pattern": {},
+    "fixedBinSizeUpstream": "50:60",
+    "fixedBinSizeDownstream": "50:80",
+    "bedgraphNames": {},
+    "annotationNames": {},
+    "cores": 6,
+    "normalize": false,
+    "tmpDir": "path/for/tmpfiles"
+  }
+}

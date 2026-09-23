@@ -1,0 +1,40 @@
+Package: metageneR
+Title: Utility Tools to Create and Manipulate Genomic Regions
+Version: 0.0.0.9000
+Authors@R: c(
+    person("Katharina", "Reinisch", email = "reinisch@bio.ifi.lmu.de", role = c("aut", "cre")),
+    person("Tolga", "Tabanli", email = "tolgatabanli@gmail.com", role = c("aut")),
+    person("Michael", "Kluge", email = "kluge@bio.ifi.lmu.de", role = c("aut")),
+    person(c("Caroline", "C."), "Friedel", email = "friedel@bio.ifi.lmu.de", role = c("aut")))
+Description: Create annotations from GTF or BED files, convert coverage results into binned regions in the annotations and plot results in metagene plots.
+License: GPL (>= 3)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Suggests:
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0),
+    ComplexHeatmap,
+    circlize,
+    fastcluster,
+    parallelDist
+Imports:
+    rtracklayer,
+    processx,
+    magrittr,
+    data.table,
+    jsonlite,
+    parallel,
+    RColorBrewer,
+    digest,
+    tools,
+    grid, 
+    methods,
+    stats, 
+    graphics, 
+    grDevices, 
+    utils
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+Config/roxygen2/version: 8.0.0
+RoxygenNote: 7.3.2

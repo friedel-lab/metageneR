@@ -1,0 +1,29 @@
+# R package build artifacts
+*.tar.gz
+*.Rcheck/
+metageneR.Rcheck
+
+# RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# macOS
+.DS_Store
+
+# Test output (generated at runtime, not fixtures)
+tests/testthat/out_test/
+tests/testthat/out_plot/
+
+# Files generated in vignette
+inst/extdata/example_run/*.Rds
+
+# Large genomic data (never commit)
+*.bw
+*.bigwig
+*.bigWig
+*.bai
+
+# Logs
+*.log

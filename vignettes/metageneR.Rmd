@@ -1,0 +1,1027 @@
+---
+title: "metageneR"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 2
+    theme: "cosmo"
+vignette: >
+  %\VignetteIndexEntry{metageneR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+```{r setup}
+library(metageneR)
+```
+
+# Introduction
+
+A metagene plot shows the average sequencing coverage across a set of genomic features. Such plots 
+can easily be created using the `metageneR`.
+
+This vignette provides a step-by-step guide on using the `metageneR` package for generating annotation files, binning genomic regions, creating metagene plots and further analysing the coverage data. 
+
+The package has two preparation stages and one analysis layer:
+
+```
+ Stage 1 Annotation        Stage 2: Binning           Stage 3: Analysis
+ make_windows()      -->   bin_genome()         -->   load_metagene_data()
+ GTF/GFF/BED               BEDgraph coverage             |
+ + up/downstream           -> one table per sample       |-- visualize
+                              (features x bins)          |-- compare conditions
+                                                         '-- curate the feature set
+```
+
+
+**Annotation:** `make_windows()` turns a gtf/gff/bed file into a bed annotation, with optional filtering and extension by upstream and downstream regions.
+
+**Bining:** `bin_genome()` divides every feature into bins and measures the
+coverage per bin, like a histogram per feature. The result is one csv file per
+sample with features as rows and bins as columns.
+
+**Analysis.** `load_metagene_data()` reads a binning run once. Everything else
+works on the loaded data:
+
+- *Visualize*: `plot_metagene_experiment()`, `plot_metagene_from_json()`,
+  `heatmap_binMatrix()` for plotting the data, `get_metagene_profiles()` gives the respective numbers behind the metagene curves.
+- *Compare*: `compare_metagene()` quantifies the difference between two conditions.
+- *Curate the feature set*: `detect_outlier_features()` and `cluster_metagene()`
+  return sets of feature IDs, `filtering_impact()` shows what removing features
+  does to the curve. ID sets go back into loading and plotting through
+  `ids_to_subset`.
+<!-- TODO: maybe put metagene plot as example -->
+
+Plotting requires upstream/downstream and bin information,
+which are all found in the binning files.
+
+## Requirements 
+- JAVA setup for binGenome.jar, a binning program that ships with the package
+- [Optional] bedtools or bigWigToBedgraph if you want to convert your coverage files to bedgraph
+
+## Working Environment
+ Organize your directory as follows below. `<output_dir>` is an argument of
+`bin_genome()`; `out/`, the config and the cache are created automatically.
+
+```{bash wdir-tree, eval=FALSE}
+.
+├── script.R                    # R script
+├── data/                       # gff files
+├── annotations/                # from make_windows()
+│   ├── .bed files
+│   └── .json files
+├── binning_output/
+│   ├── <output_dir>/ ...       # from bin_genome()
+│   │   ├── *out/*              # output of binGenome.jar
+│   │   ├── *.Rds*              # (later) cache from aggregation in plotting
+│   │   └── *config.json*       # parameters for annotation and binning
+│   └── ...
+└── plots/                      # from plot_metagene()
+    ├── metagene_.pdf ...
+    └── .json files ...
+```
+
+If multiple scripts for annotation, binning and plotting are used,
+it is instructive to have them at the same (root) level.
+This makes it easier to rely on config files.
+
+# Stage 1: Annotation
+
+Genomic features are binned based on bed annotations. 
+`make_windows()` enables the convenient generation of a bed annotation file with up/downstream region sizes while filtering for genomic features:
+
+```{r bed-anno, eval=FALSE}
+gtf_file <- system.file("extdata", "data", "example.gtf", package = "metageneR")
+windows <- make_windows(gtf_file,
+                        upstream = 3000, downstream = 4000,
+                        filter = filter_gtf_by(type == "gene", width > 1000))
+head(windows)
+```
+
+Upstream and downstream windows are placed in the direction of the strand. If coordinates are below 0 after adding windows, regions are dropped (with a message). Set `path_to_output` if you want to save the bed file:
+
+```{r, eval=FALSE}
+make_windows(gtf_file,
+             upstream = 3000, downstream = 4000,
+             path_to_output = "annotations/genes_3kbup_4kbdown.bed",
+             filter = filter_gtf_by(type == "gene", width > 1000))
+```
+
+## Filtering with gtf/gff files with `filter_gtf_by()`
+
+Filter expressions are separated by commas and combined with logical AND and are applied before window extension.
+
+```{r, eval=FALSE}
+# Single condition
+filter_gtf_by(type == "gene")
+
+# Multiple conditions
+filter_gtf_by(type == "exon", width > 1000, source == "HAVANA")
+
+# %in% for multiple allowed values
+filter_gtf_by(type == "gene", gene_biotype %in% c("lncRNA", "protein_coding"))
+```
+
+Use variables from your script in a filter:
+
+```{r}
+my_genes <- c("ENSG00000142611", "ENSG00000228037")
+make_windows(gtf_file, filter = filter_gtf_by(gene_id %in% my_genes))
+```
+
+Which columns exist depends on your gtf (an Ensembl gtf has `gene_biotype`,
+a UCSC refGene gtf does not). To see them:
+
+```{r}
+names(as.data.frame(rtracklayer::import(gtf_file)))
+```
+Some possible columns: seqnames, start, end, width, strand, source, type, score, phase, gene_id, gene_version, gene_name, gene_source, gene_biotype, transcript_id, transcript_version, transcript_name, transcript_source, transcript_biotype, tag, transcript_support_level, exon_number, exon_id, exon_version, protein_id, protein_version, ccds_id
+
+A filter using an unknown name stops with the list of available columns.
+
+**Note:** Filters only work with gtf/gff input files, not with bed files!
+
+## Windows around a single position
+With `position = "start"` or `"end"` the windows are built around one coordinate instead of the whole feature. Also here, the strand is considered when determining start or end coordinates.
+
+Building windows around the TSS with 1kb upstream and 2kb downstream:
+
+```{r}
+tss <- make_windows(gtf_file, upstream = 1000, downstream = 2000,
+                    position = "start", filter = filter_gtf_by(type == "gene"))
+head(tss, 3)
+```
+
+## Feature ids for subsetting
+
+`ids_from_gtf()` uses the same filter syntax as `filter_gtf_by()` but returns ids instead of
+windows. The ids can be used for subsetting features in plots
+as `ids_to_subset` without creating and binning a second annotation.
+
+```{r}
+lnc_ids <- ids_from_gtf(gtf_file, filter = filter_gtf_by(gene_biotype == "lncRNA"))
+lnc_ids
+```
+
+## Saving annotation parameters
+
+When the output is written to a file, a JSON file with all parameters is created for reproducibility.
+
+- The default location is the directory of the output bed file, with the same basename
+- `save_pars_to` sets a different location
+- A log file is written to the same directory (path is shown on the console and stored in the config) 
+
+# Stage 2: Binning
+
+## Preparing input files
+
+`bin_genome()` reads uncompressed bedgraph files, file per strand if the data is stranded. If your data is in another format, this section is for you:
+
+If you have...
+- bam: `bt_genomecov()` (needs `bedtools`)
+- bed/gff/vcf with *overlapping* entries e.g. reads: `bt_genomecov()` with a genome file
+- bed with non-overlapping and a score column (bed with 6 columns): `bed_to_bedgraph()` 
+- BigWig: `bw_to_bedgraph()` (needs `bigWigToBedGraph`)
+- bedgraph.gz: `decompress_bedgraph_gz()` 
+- bedgraph with `track`/`browser`/`#` header lines: `strip_bedgraph_header()`
+- bedgraph with negative values for the minus strand: `abs_bedgraph()` 
+
+*From bam**
+
+```{r, eval=FALSE}
+set_bedtools_path("/usr/bin/bedtools")   # only if bedtools is not in the PATH
+
+# unstranded
+bt_genomecov(input = "sample.bam", output_file = "coverage/sample.bedgraph")
+
+# strand-specific: writes coverage/sample_pos.bedgraph and coverage/sample_neg.bedgraph
+bt_genomecov(input = "sample.bam", output_file = "coverage/sample", stranded = TRUE)
+```
+
+For bed, gff or vcf input, `bedtools` additionally needs a genome file
+with chromosome names and sizes. Run `bt_genomecov("reads.bed", "coverage/sample", genome = "mm9.chrom.sizes")`.
+
+**From a bed file with scores.** If the intervals do not overlap, you can use `bed_to_bedgraph()` to split the file by strand (column 6) into `_pos` and `_neg` bedgraphs This stops if intervals on the same strand overlap.
+
+```{r, eval=FALSE}
+bed_to_bedgraph("signal.bed", "coverage/signal")
+```
+
+**From BigWig.**
+
+```{r, eval=FALSE}
+set_bigwigtobedgraph_path("/usr/local/bin/bigWigToBedGraph")   # only if not in the PATH
+
+bw_to_bedgraph(input = "signal.bw", output_file = "coverage/sample.bedgraph")
+
+# restrict to a region
+bw_to_bedgraph(input = "signal.bw", output_file = "coverage/sample_chr1.bedgraph",
+               chrom = "chr1", start = 0, end = 5000000)
+```
+
+**Cleaning up bedgraph files.**
+
+```{r, eval=FALSE}
+# decompress all .bedgraph.gz in a folder
+decompress_bedgraph_gz(input_dir = "path/to/bedgraph", output_dir = "path/to/bedgraph")
+
+# remove track/browser/# header lines; reports what was removed
+strip_bedgraph_header(input = "coverage/sample_with_header.bedgraph",
+                      output_file = "coverage/sample_clean.bedgraph")
+
+# minus-strand coverage stored as negative numbers -> positive; reports how many values changed
+abs_bedgraph(input = "coverage/sample_neg.bedgraph",
+             output_file = "coverage/sample_abs.bedgraph")
+```
+
+## Running `bin_genome()`
+
+`bin_genome()` uses the Java program `genomeBinner.jar` that ships with the
+package. To use a different jar or a bash executable that calls it, set it once
+per session with `set_binGenome_path()`.
+
+Now let's get to the example data:
+all bedgraphs in `input_dir` should be used for binning, they are stranded with "Plus" indicating files with coverage n the + strand, "Minus" for -, respectively.
+We are using the annotation generated above. Each feature body is divided into 200 bins. The 3 kb
+upstream region is covered by 60 bins of size 50 and the 4 kb downstream
+region by 80 bins of size 50, following the format `"binsize:binnumber"`.
+If the fixed bins do not fit the windows created by `make_windows()`
+(60 x 50 = 3000 = `upstream`), we will fix some parts of the feature, too (can be handy for eg Promoter regions). With cores we define how many cores can be used for binning to make it faster!
+
+```{r bin-genome, eval=FALSE}
+bin_genome(
+    input_dir = "path/to/bedgraph",
+    strand = 1,
+    strand_pattern = "Plus/Minus",
+    annotation = "annotations/genes_3kbup_4kbdown.bed",
+    output_dir = "binning_output/genes_3kbup_4kbdown",
+    bins = 200,
+    fixedBinSizeUpstream = "50:60",
+    fixedBinSizeDownstream = "50:80",
+    cores = 6
+)
+```
+
+
+Useful further arguments:
+
+- `grep_pattern` restricts the run to matching files (perl regex), e.g.
+  `"^(?!.*Ctrl).*$"` for all files without "Ctrl" in the name.
+- `tmpDir` sets the directory for temporary files of the Java program. By
+  default the Java temp directory is used; set `tmpDir` if that is small or
+  not writable. For errors, see [Troubleshooting](#common-issues).
+
+The output directory then contains `out/` with two files per sample:
+`<sample>_<annotation>.<bins>.coverage.csv` (features x bins) and
+`<sample>.sum.csv` (total coverage of the sample, used for library size
+normalization).
+
+## Strandedness options
+
+The `strand` parameter controls how strand-specific coverage is handled:
+
+- **`strand = 0`**: Data is unstranded. All bedgraph files are processed without strand separation. Use this when:
+  - The alignment method is unstranded
+  - To combine coverage from both strands
+
+- **`strand = 1`** (regular): Assumes bedgraph files contain strand indicators matching `strand_pattern` (default "pos/neg"):
+  - Files with "pos" in the name correspond to the positive strand
+  - Files with "neg" correspond to the negative strand
+
+- **`strand = -1`** (reverse stranded): Same as `strand = 1` but swaps the mapping. Use this if your library protocol produces reads from the opposite strand
+
+The `strand_pattern` argument specifies how to identify strands in filenames.
+Format must be "pattern1/pattern2" where pattern1 identifies positive strand files and pattern2 negative strand files.
+Patterns are matched literally (no regex escaping needed), e.g., `strand_pattern = "+/-"` works fine.
+
+When `strand != 0`, the two strand files of a sample are merged into one output, named after the file used as positive strand.
+
+## Config and log files
+
+Every `bin_genome()` call creates two files in `output_dir`:
+
+1. **`config.json`** holds all parameters of the run. The analysis functions read
+   it, e.g. to label the upstream and downstream bins, so keep it next to `out/`.
+
+```json
+{
+  "bin_genome": {
+    "input_dir": "path/to/bedgraph",
+    "strand": 1,
+    "annotation": "annotations/genes_3kbup_4kbdown.bed",
+    "output_dir": "binning_output/genes_3kbup_4kbdown",
+    "strand_pattern": "Plus/Minus",
+    "bins": 200,
+    "grep_pattern": {},
+    "fixedBinSizeUpstream": "50:60",
+    "fixedBinSizeDownstream": "50:80",
+    "bedgraphNames": {},
+    "annotationNames": {},
+    "cores": 6,
+    "normalize": false,
+    "tmpDir": {}
+  }
+}
+```
+
+2. **`log.txt`** records timestamps, all input parameters, progress messages from
+   the Java program, warnings and errors. The Java program writes an additional
+   log file of its own into the output directory.
+
+**"too small regions" warnings**: features that are too short to produce the requested number of bins are skipped during binning.
+Check the log to make sure this did not remove too many features.
+
+
+## Per-feature normalized output
+
+Set `normalize = TRUE` to additionally write a per-feature normalized version of
+the binned data (`.norm.coverage.csv` files in `out/`). The analysis functions
+ignore these files by default (`cov_files_to_ignore = ".norm.coverage.csv"`)
+and offer their own normalization options instead.
+
+
+### Config File
+
+A config file is created inside the specified `<binning_output>`.
+This has the following structure as an example:
+
+```json
+{
+  "bin_genome": {
+    "input_dir": "path/to/bedgraph",
+    "strand": 1,
+    "annotation": "anno/my_favorite_gene_regions.bed",
+    "output_dir": "binning_output/my_favorite_gene_regions",
+    "strand_pattern": "pos/neg",
+    "bins": 300,
+    "grep_pattern": "^(?!.*Ctrl).*$",
+    "fixedBinSizeUpstream": "10:30",
+    "fixedBinSizeDownstream": "10:20",
+    "bedgraphNames": {},
+    "annotationNames": {},
+    "cores": 6,
+    "normalize": false,
+    "tmpDir": "/tmp"
+  }
+}
+```
+
+It should be noted that `output_dir` is relative to the root.
+
+Plotting will require the count data in `output_dir` to create `binmatrix` objects,
+and eventually `fixedBinSize...` parameters to create fixed bin labels for upstream and downstream.
+
+# Loading a binning run
+
+All analysis functions work on the output of `load_metagene_data()`. It reads
+the coverage tables aka BinMatrices of a run directory, combines replicates per condition and
+keeps the binning config attached. Load once, then pass the result as `metagene_data` to as many plots and analyses as you like.
+
+The example data here is a small subset of a GRO-seq time course after flavopiridol (FP) treatment in
+mouse embryonic stem cells (Jonkers et al. 2014, GEO: GSE48895), binned as shown in
+[Running `bin_genome()`](#running-bin-genome).
+
+```{r load}
+run_dir <- system.file("extdata", "example_run", package = "metageneR")
+list.files(file.path(run_dir, "out"))
+
+cond_mapper <- data.frame(
+  grep_name    = c("DMSO", "12.5minFP", "25minFP"),
+  display_name = c("DMSO", "FP 12.5 min", "FP 25 min"),
+  color        = c("grey30", "orange", "red3"),
+  stringsAsFactors = FALSE
+)
+
+md <- load_metagene_data(run_dir, condition_mapper = cond_mapper)
+names(md)
+```
+
+## The condition mapper
+
+`condition_mapper` is a data frame with one row per condition:
+
+- `grep_name`: a regular expression that finds the coverage files of the condition
+- `display_name`: the name used in plots and results
+- `color`, `linetype` (optional): how the condition is drawn
+
+`condition_mapper` also defines the replicate groups: all coverage files
+matching a `grep_name` are treated as replicates of one condition and combined
+with `aggr_rep_FUN` (default `mean`). The example data has one sample per condition, so nothing is combined here.
+
+Make sure that your grep_names are as specific as necessary
+to prevent accidental combination of multiple conditions!. In a directory containing
+`HIF1A_KO_rep1`, `HIF1A_KO_rep2`, `HIF1A_KD_rep1`, `HIF1A_KD_rep2`,
+`HIF1A_KO_KD_rep1` and `HIF1A_KO_KD_rep2`, the pattern `KO` captures both `KO`
+and `KO_KD`. Use `KO_rep` for the KO group instead. The files found for each
+condition are printed during loading.
+
+If you omit `condition_mapper`, one condition per sample is created from the
+`.sum.csv` file names, with default colors. 
+
+## Subsetting features
+
+`ids_to_subset` restricts the data to the given feature ids, e.g. from `ids_from_gtf()`. The function reports how many of the requested ids were found and stops if none match.
+
+```{r subset}
+cov_file <- list.files(file.path(run_dir, "out"), pattern = "coverage", full.names = TRUE)[1]
+all_ids  <- data.table::fread(cov_file, select = "ID")$ID
+
+md_small <- load_metagene_data(run_dir, condition_mapper = cond_mapper,
+                               ids_to_subset = c(all_ids[1:50], "not_a_feature"))
+```
+
+## Caching
+
+Reading and combining large BinMatrices takes time, so the result is cached
+as an RDS file inside `run_dir`, named after the replicate function
+(`matrix_aggr_with_mean.Rds` for `aggr_rep_FUN = mean`). Later calls read the
+cache. If `run_dir` is not writable, as for the installed example data on some
+systems, caching is skipped with a message.
+
+The cache always holds the full data; subsets via `ids_to_subset` are applied
+after reading and are never cached.
+
+Set `overwrite_rds_objects = TRUE` (or delete the file) after
+
+- binning again into the same directory,
+- changing which files belong to a condition (`grep_name`) or the display names.
+
+
+
+
+
+
+
+
+
+
+
+## Plotting
+
+The `plot_metagene_experiment()` function generates metagene plots as PDFs.
+It accepts a plotting directory and binning results,
+plots coverage curves according to the sample mapping.
+Binning data should be inside `<binning_output>/out`.
+`bin_genome` creates the "out/" automatically and `plot_metagene_experiment()`
+knows to find them as `file.path(run_dir, "out")`.
+The `condition_mapper` argument (a data frame) allows to specify color and linetypes, and their assignment to samples based on file names and regex patterns.
+An example condition mapper could be:
+
+```{r, eval=FALSE}
+# Assuming list.files("path/to/bedgraph") returns:
+#> "seq_inh_rep1_pos.bedgraph"  "seq_inh_rep2_pos.bedgraph"
+#> "seq_act_rep1_pos.bedgraph"  "seq_act_rep2_pos.bedgraph"
+#> etc...
+cond_mapper <- data.frame(
+  color        = c("red", "green", "blue"),
+  grep_name    = c("_inh_", "_act_", "_ctrl_"),
+  display_name = c("Inhibitor", "Activator", "Control"),
+  stringsAsFactors = FALSE
+)
+
+```
+
+Hence, `condition_mapper` also defines the replicate groups.
+In other words, all BEDgraph files matching a pattern are treated as a single replicate group.
+The function then aggregates the replicates of each group using the provided aggregation function.
+The users should pay attention to how the grep patterns are provided since the function does not know
+where to expect the respective condition. For example, in a directory containing `HIF1A_KO_rep1.coverage.csv`,
+`HIF1A_KO_rep2.coverage.csv`, `HIF1A_KD_rep1.coverage.csv`, `HIF1A_KD_rep2.coverage.csv`,
+`HIF1A_KO_KD_rep1.coverage.csv`, `HIF1A_KO_KD_rep2.coverage.csv`,
+a condition grep as `KO` would capture both `KO` and `KO_KD`. Instead, use `KO_rep` for the KO groups.
+
+An example call of the function:
+
+```{r, eval=FALSE}
+plot_metagene_experiment(
+    plot_dir = "plots",
+    run_dir = binning_result, # relates to bin_genome step
+    plot_prefix = "annotation_label", # relates to make_windows step
+    condition_mapper = cond_mapper,
+    aggregate_FUN = mean # default is also mean
+)
+```
+
+It plots all the pairwise comparisons of each sample per default.
+This behavior can be disabled by setting `plot_pairs = FALSE`.
+`plot_preifx` is a utility parameter with which the plot output
+can be named. For example, in a loop with a complex experimental setup
+(e.g. across conditions and different annotations), different plots
+can be distinguished by assigning such an annotation name to the plot,
+since the conditions are generally compared within the plots.
+
+The function utilizes configuration files (.json) to determine plotting parameters.
+Annotations are linked to their BED files via the same filename.
+Binning results are stored within the binning directory itself.
+
+For more details and developing, see the source code of
+the internal plotting module: `inst/src/binGenome.lib.R`.
+
+### Auto-generating condition_mapper
+
+If you omit `condition_mapper`, the function auto-generates it from coverage files.
+Auto-generation extracts unique condition names from `.sum.csv` file basenames and assigns default colors, linetype (solid) and display names.
+
+Limitations of auto-generation:
+
+- Works only if file naming is clean (no special characters)
+- May fail if condition names contain ambiguous patterns
+- If cached RDS exists, generation reads condition names from cache
+- Structure of replication disapears since every sample is treated as its own replicate.
+
+### Feature Subsetting
+
+Plot only specific genes/regions instead of all features using `ids_to_subset`:
+
+```{r, eval=FALSE}
+# Plot only genes of interest
+genes_of_interest <- c("ENSG00000228037", "ENSG00000284616", "ENSG00000260972")
+
+plot_metagene_experiment(
+    plot_dir = "plots",
+    run_dir = binning_result,
+    plot_prefix = "whole_gene",
+    ids_to_subset = genes_of_interest,
+    condition_mapper = cond_mapper,
+    ...
+)
+```
+
+
+**Important:** When using `ids_to_subset` with cached RDS objects, set `overwrite_rds_objects = TRUE` or delete the cache to avoid using incorrectly cached data.
+
+The function allows setting the `title`, and, if upstream and downstream regions were used,
+the start and end labels of the regions (`region_start_label` and `region_end_label` resp.).
+
+### RDS Caching
+
+Because the aggregation process might take long, `plot_metagene_experiment()` caches
+aggregated binmatrices as RDS files inside `run_dir`:
+
+**RDS file:** `file.path(run_dir, paste0("matrix_aggr_with_", aggr_func, ".Rds"))`
+
+For example, using `aggr_rep_FUN = mean` creates `matrix_aggr_with_mean.Rds`.
+
+**Cache behavior:**
+
+- On first call: Creates cache (useful for multiple subsequent plots)
+- On subsequent calls: Reads from cache (much faster)
+- Set `overwrite_rds_objects = TRUE` to force cache recreation
+
+**NOTES:**
+
+- If you change `ids_to_subset`, the cache may not reflect the new subset correctly
+- If you rerun binning with different parameters, the old cache is still used
+- Different `aggr_rep_FUN` functions use different RDS files
+
+### Advanced Plotting Parameters
+
+Further parameters can be passed to the function via `...` and are used in the underlying
+plotting library (`binGenome.lib.R`).
+To see available parameters:
+
+```{r, eval=FALSE}
+args_for_metagene_plot()
+```
+
+This prints descriptions of the `plotGroup()` function's parameters including:
+
+- `normBy...` pars: Normalize by various properties such as bin length, shape, maximum value.
+- `minYA`, `maxY`: Set y-axis limits
+- `ylab`, `xlab`: Axis labels
+- `legendPos`: Legend position ("top", "bottom", etc.)
+- `fixedLabelsStart`, `fixedLabelsEnd`: Custom axis labels for regions
+- Many more... (see output of `args_for_metagene_plot()`)
+
+**Example with advanced parameters:**
+
+```{r, eval=FALSE}
+plot_metagene_experiment(
+    plot_dir = "plots",
+    run_dir = binning_result,
+    plot_prefix = "whole_gene",
+    condition_mapper = cond_mapper,
+    normByShapeSum = FALSE,
+    normByBinlength = TRUE,
+    ylab = "ChIP-seq Coverage",
+    legendPos = "top",
+    threads = 4
+)
+```
+
+### Region Coordinate Labels
+
+Control how upstream/downstream regions are labeled in plots:
+
+```{r, eval=FALSE}
+plot_metagene_experiment(
+    plot_dir = "plots",
+    run_dir = binning_result,
+    plot_prefix = "whole_gene",
+    region_start_label = "TSS",      # default
+    region_end_label = "TTS",        # default (Transcription Termination Site)
+    upstream_bp = 1000,              # actual upstream distance to show
+    downstream_bp = 2000,            # actual downstream distance to show
+    ...
+)
+```
+
+**Note:** `upstream_bp` and `downstream_bp` must be <= the fixed bin sizes used in `bin_genome()`.
+These parameters serve as utilities to denote the fixed label region at the start and end of the metagene region.
+For example, the 200 bp upstream *and* downstream of transcription start site and 100 bp upstream *and* downstream of transcription termination site requires labels extending into the gene body:
+
+```
+  -- Upstream -- |         --- Gene Body ---         | - Downstream -
+   |       |     |     |      |    | | | |     |     |     |
+-200bp, -100bp, TSS, 100bp, 200bp, < %%% >, -100bp, TTS, 100bp
+```
+
+In this case, use `fixedBinSizeUpstream="50:8"` and `fixedBinSizeDownstream="50:4"` while binning and `upstream_bp=200` and `downstream_bp=100` so that the function can infer which bins were meant to stay outside the gene body and vice versa.
+
+Alternatively, `fixedLabelsStart` and `fixedLabelsEnd` parameters can be used for explicit control (see `args_for_metagene_plot()`).
+
+## Summary & Data Structures
+
+**`make_windows()`**
+
+```{r, eval=FALSE}
+result <- make_windows(gtf_file, upstream = 1000, downstream = 2000)
+```
+
+Returns invisibly: a data.frame (also written to path_to_output if specified). Columns: seqnames, start, end, name, score, strand. Note that seqnames and strand are factors.
+
+**`bin_genome()`**
+
+```{r, eval=FALSE}
+bin_genome(input_dir, strand = 1, annotation = anno, output_dir = out, ...)
+```
+
+Returns invisibly: NULL. Side effects: creates output_dir/out/ with coverage .csv files, config.json, and log.txt.
+
+**`plot_metagene_experiment()`**
+
+```{r, eval=FALSE}
+plot_metagene_experiment(plot_dir, run_dir, plot_prefix, ...)
+```
+
+Returns invisibly: NULL. Side effects:
+- Creates PDF plots in plot_dir
+- Creates JSON metadata files alongside PDFs
+- Saves RDS cache of aggregated binmatrices in run_dir
+
+**binMatrix objects** (internal data structure):
+These S4 objects from the binGenome.lib package contain:
+
+- `@cov`: The coverage matrix (rows = features, columns = bins)
+- `@attributes`: Metadata including aggregated coverage per bin used in metagene plots
+
+binMatrix objects are created internally during plotting aggregation and stored in cached RDS files. You can inspect them:
+
+```{r, eval=FALSE}
+# Load cached aggregated binmatrices
+aggregated <- readRDS(file.path(run_dir, "matrix_aggr_with_mean.Rds"))
+names(aggregated)  # condition names
+```
+
+### Performance and Threading
+
+Use `threads` parameter to parallelize pairwise plotting:
+
+```{r, eval=FALSE}
+plot_metagene_experiment(
+    plot_dir = "plots",
+    run_dir = binning_result,
+    plot_prefix = "whole_gene",
+    condition_mapper = cond_mapper,
+    threads = 4,          # use 4 cores for pairwise plots
+    plot_pairs = "all",    # pairwise plotting benefits from parallelization
+    ...
+)
+```
+
+**Important:** Threading with `mclapply()` might NOT work in RStudio; use the terminal instead.
+
+## Multiple annotations and experiments
+A metagene task defined by the same binning parameters may consist of multiple annotations and experiments.
+Moreover, different conditions may exist in different experiments.
+One solution to these challenges would be to create a grid of jobs and execute the functions iteratively.
+An example is given here for two annotations and two experiments with different numbers of conditions:
+
+```{r, eval=FALSE}
+experiments <- c("ASeq", "BSeq")
+# for using corresponding annotation file and naming the plot
+annotations <- c("whole_gene" = "Whole Gene Region",
+                 "down_10kb" = "To 10 kb Downstream")
+samples <- list()
+samples[[experiments[1]]] <- data.frame(
+  color        = c("red", "green", "blue"),
+  grep_name    = c("dmso", "ots964", "pladB"),
+  display_name = c("DMSO", "OTS964", "PladB"),
+  stringsAsFactors = FALSE
+)
+samples[[experiments[2]]] <- data.frame(
+  color        = c("red", "green", "blue", "#00233f"),
+  grep_name    = c("rna_DMSO_rep", "rna_OTS_dTAG_rep", "rna_OTS_rep", "rna_dTAG_rep"),
+  display_name = c("DMSO", "OTS + YTHDC1 dTAG", "OTS", "YTHDC1 dTAG"),
+  stringsAsFactors = FALSE
+)
+
+# here, the combinations
+jobs <- expand.grid(annotation = names(annotations),
+                    experiment = experiments,
+                    stringsAsFactors = FALSE)
+plot_dir <- "plots"
+
+# We assume the binning results are organised according to
+# file.path("binning_output", <experiment>, <annotation>)
+
+# Considerations for parallel execution, not critical
+optimal_cores <- min(nrow(jobs), total_cores)
+remaining_cores <- max(total_cores - optimal_cores, 1)
+
+mclapply(seq_len(nrow(jobs)), function(i) {
+    experiment <- jobs$experiment[i]
+    anno     <- jobs$annotation[i]
+    title <- annotations[[anno]]
+
+    dir.create(file.path(plot_dir, experiment), showWarnings = FALSE, recursive = TRUE)
+
+    plot_metagene_experiment(
+      plot_dir = file.path(plot_dir, experiment),
+      run_dir = file.path(run_dir, experiment, anno),
+      plot_prefix = anno,
+      title = title,
+      condition_mapper = samples[[experiment]],
+      threads = remaining_cores,
+    )
+  }, mc.cores = optimal_cores, mc.preschedule = TRUE, mc.cleanup = TRUE)
+
+```
+
+## Re-plotting with JSON Parameters
+
+After initial plotting, the function saves plotting parameters as JSON files.
+These can be used to re-plot with modified parameters without re-aggregating:
+
+```{r, eval=FALSE}
+# Re-plot using saved parameters from initial plot
+plot_metagene_from_json(
+    plot_dir = "plots_modified",
+    file_name = "my_comparison_v2",
+    path_to_binMatrixList = file.path(binning_result, "matrix_aggr_with_mean.Rds"),
+    json_file = "plots/metagene_whole_gene_DMSO_vs_OTS964.json",
+    ylab = "Modified Label",      # override JSON parameters
+    normByShapeSum = TRUE,        # change normalization
+    ids_to_subset = genes_of_interest
+)
+```
+
+This is useful for:
+
+- Creating multiple versions with different labels/normalization
+- Sharing reproducible plotting specifications
+- Iterative refinement of visualization
+
+## Utility Functions
+
+### Naming Output Files by Parameters
+
+Use `name_output_with()` to generate standardized file names from parameters:
+
+```{r, eval=FALSE}
+file_name <- name_output_with(
+    enclosing_dir = "output/",
+    pars = list(
+        input_file = "my_annotation.gtf",
+        upstream = 1000,
+        downstream = 2000,
+        custom_param = "value"
+    ),
+    ext = ".bed"
+)
+# Result: "output/my_annotation_1000up_2000down_value.bed"
+```
+
+### Tiny Wrapper for `bedtools` {#bedtools-wrapper}
+
+Generate genome-wide BEDgraph coverage files from BAM files using `bedtools`:
+
+```{r, eval=FALSE}
+# Set bedtools executable
+set_bedtools_path("/usr/bin/bedtools")
+
+# Generate unstranded coverage
+bt_genomecov(
+    input = "sample.bam",
+    output_file = "coverage/sample.bedgraph",
+    stranded = FALSE
+)
+
+# Generate strand-specific coverage (creates _pos and _neg files)
+bt_genomecov(
+    input = "sample.bam",
+    output_file = "coverage/sample",  # extension stripped, _pos/_neg added
+    stranded = TRUE
+)
+```
+
+This generates normalized depth-of-coverage in BEDgraph format suitable for `bin_genome()` input.
+
+To convert existing BigWig files to BEDgraph instead, use `bw_to_bedgraph()`:
+
+```{r, eval=FALSE}
+# Set executable if not in PATH
+set_bigwigtobedgraph_path("/usr/local/bin/bigWigToBedGraph")
+
+# Convert whole file
+bw_to_bedgraph(
+    input = "signal.bw",
+    output_file = "coverage/sample.bedgraph"
+)
+
+# Restrict to a region
+bw_to_bedgraph(
+    input = "signal.bw",
+    output_file = "coverage/sample_chr1.bedgraph",
+    chrom = "chr1", start = 0, end = 5000000
+)
+```
+
+#### Preprocessing utilities
+
+Two helpers clean up BEDgraph files before passing them to `bin_genome()`.
+
+`strip_bedgraph_header()` skips leading `track`, `browser`, or `#` comment lines
+that some tools prepend, and informs you about what was removed.
+
+`abs_bedgraph()` converts negative score values to their absolute values,
+reporting how many values were changed. Useful for minus-strand
+BEDgraph files where coverage is stored as negative numbers.
+
+```{r, eval=FALSE}
+# Remove track/browser/# header lines
+strip_bedgraph_header(
+    input = "coverage/sample_with_header.bedgraph",
+    output_file = "coverage/sample_clean.bedgraph"
+)
+
+# Convert negative scores to positive
+abs_bedgraph(
+    input = "coverage/sample_neg.bedgraph",
+    output_file = "coverage/sample_abs.bedgraph"
+)
+```
+
+# Common Issues and Solutions {#common-issues}
+
+**Problem: "No BEDgraph files found"**
+
+- Check file extensions (.bedgraph or .bedgraph.gz required)
+- Verify `input_dir` path is correct
+- Ensure `grep_pattern` doesn't filter out all files
+
+**Problem: "Seqname mismatch" warning**
+
+- Chromosomes in BEDgraph and BED annotation don't match
+- Solutions:
+  - Rename chromosomes to match (e.g., "chr1" vs "1")
+  - Use only BEDgraph files that match annotation chromosomes
+  - Filter annotation to include only relevant chromosomes
+
+**Problem: Java out-of-memory errors**
+
+- A common issue and its cause is explained in **Known Issues** -> **genomeBinner.jar**.
+- Set `tmpDir` to a different directory with more space
+- Clear accumulated temp files
+- Reduce `cores` to decrease memory usage
+
+# Comparison Metrics for binMatrix
+
+`binMatrix` objects are the essential elements of plotting.
+Various workflow parameters such as annotations, appended windows, bin numbers and sizes, aggregation functions, subset specification, and normalizations can produce different plotting data.
+To better investigate the differences, some basic comparison metrics were conceived:
+
+```{r, eval=FALSE}
+# Compare feature sets between two binning runs
+comparison <- compare_features(binmatrix_v1, binmatrix_v2)
+print(comparison)
+# c(numCommonFeats = 1500, numOnlyInBefore = 20, numOnlyInAfter = 15)
+
+# Calculate pairwise squared distances between bins for common features
+dists <- sqdist_commonFeatures(condition1_binmatrix, condition2_binmatrix)
+print(mean(dists))  # average squared distance
+
+# Bin-wise distance in metagene profiles
+bin_dists <- sq_y_dist_bins(condition1_binmatrix, condition2_binmatrix)
+print(bin_dists)  # per-bin differences
+
+# Wasserstein distance: optimal transport between distributions
+wasserstein_dists <- wassersteinOverBins(condition1_binmatrix, condition2_binmatrix)
+print(wasserstein_dists)  # per-bin Wasserstein distances
+```
+
+Refer to the respective function documentation for details.
+
+## Heatmap Visualisation {#heatmap-visualisation}
+
+`heatmap_binMatrix()` takes an RDS file produced by `plot_metagene_experiment()`
+and saves a PDF with each page as a heatmap for one condition.
+
+**Properties:**
+
+- Heatmap body is rasterized (`use_raster = TRUE`, `raster_quality = 10`) — stays lightweight even for 28 K genes × 600 bins.
+- TSS / TTS boundary positions are parsed automatically from the `@binLength` slot and annotated above and below the heatmap with `anno_mark`.
+- Row ordering is controlled by `row_order_by`: `"mean"` (fast, descending by row mean), `"hclust"` (hierarchical clustering via `fastcluster` + `parallelDist`), or `"none"`.
+- Color scale is clipped to a quantile range (default 1st–99th percentile) to prevent high-coverage outliers from washing out the palette. Color scale is shared across all conditions so intensities are directly comparable.
+
+Usage example:
+
+**Adjusting row ordering and colour scale:**
+
+```{r heatmap-options, eval=FALSE}
+heatmap_binMatrix(
+  rds_path       = "binning_output/my_annotation/matrix_aggr_with_mean.Rds",
+  output_pdf     = "plots/heatmaps.pdf",
+  row_order_by   = "hclust",   # hierarchical clustering (slow for >5k rows)
+  cluster_cores  = 4L,         # parallelise distance matrix computation
+  quantile_range = c(0.05, 0.95),
+  pdf_width      = 7,
+  pdf_height     = 12
+)
+```
+
+
+> **Note:** `ComplexHeatmap` and `circlize` are Bioconductor / CRAN packages and
+> must be installed before use:
+> ```r
+> BiocManager::install("ComplexHeatmap")
+> install.packages(c("circlize", "fastcluster", "parallelDist"))
+> ```
+
+# Specific Behaviours
+
+## Caching Validation in bin_genome
+
+`bin_genome()` always validates the input files before processing by
+checking if the scaffold names (the first column) of the annotation and BEDgraph files
+are consistent. It gives a warning if there is any seqname in a BEDgraph that is NOT
+in the annotation and reports them.
+It caches the files that were validated to avoid subsequent validations since it might
+take long with those large files.
+
+For troubleshooting, use `clear_validation_cache()` to reset the cache.
+This removes all cached validation results so the next `bin_genome()` call re-validates from scratch.
+The cache is in the user's R package cache dir such as `~/.cache/R/metageneR`,
+where you could also delete by hand the cache files.
+
+
+# For Developing
+
+## Prerequisites
+
+This package makes use of three important conventions:
+
+1. roxygen for function documentation
+2. data.table for efficient data handling
+3. tidyverse-like syntax (whereever possible)
+
+It is a good idea for contributors or future developers to be familiar with those packages.
+[R Packages](https://r-pkgs.org/) gives a thorough introduction to package development
+within R ecosystem, introducing **devtools** and **usethis** packages.
+
+Some further practices that were considered for ease of use are:
+
+1. thread-safe config and log writers for reproducibility
+2. caching for fast re-execution (see `plotting.R`, and `validate_seqnames` in `bin_genome.R`)
+3. compatibility with internals (**genomeBinner.jar** and **binGenome.lib.R**)
+
+## Known Issues
+
+### genomeBinner.jar
+
+*genomeBinner.jar* writes many temporary files to sort and index the read data.
+A frequently encountered problem while running the program on big input files
+was that it would throw some complicated JVM errors mostly related to file system (such as SIGBUS),
+multithreading or space errors.
+If the process owner has restricted access (such as a student), this is most often due to
+the tmp directory being cluttered with junk files remaining from previous (unsuccessful) runs.
+If these fill the amount allocated to the user, the program might exceed the allowed amount of
+space and might throw those errors.
+
+### validate_seqnames
+
+This might serve as an early-warning if the BEDgraph files have names incompatible
+with the annotation but it currently takes long time (and does probably unnecessary work
+checking each and every file).

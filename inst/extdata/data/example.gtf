@@ -1,0 +1,10 @@
+chr1	havana	gene	2581560	2584533	.	+	.	gene_id "ENSG00000228037"; gene_version "1"; gene_source "havana"; gene_biotype "lncRNA";
+chr1	ensembl_havana	gene	3069168	3438621	.	+	.	gene_id "ENSG00000142611"; gene_version "17"; gene_name "PRDM16"; gene_source "ensembl_havana"; gene_biotype "protein_coding";
+chr1	havana	gene	5301928	5307394	.	-	.	gene_id "ENSG00000284616"; gene_version "1"; gene_source "havana"; gene_biotype "lncRNA";
+chr1	ensembl_havana	gene	2403964	2413797	.	-	.	gene_id "ENSG00000157911"; gene_version "11"; gene_name "PEX10"; gene_source "ensembl_havana"; gene_biotype "protein_coding";
+chr1	havana	gene	5492978	5494674	.	+	.	gene_id "ENSG00000260972"; gene_version "1"; gene_source "havana"; gene_biotype "lncRNA";
+chr1	havana	gene	10054445	10054781	.	-	.	gene_id "ENSG00000224340"; gene_version "1"; gene_name "RPL21P21"; gene_source "havana"; gene_biotype "processed_pseudogene";
+chr1	havana	gene	3944547	3949024	.	-	.	gene_id "ENSG00000226374"; gene_version "3"; gene_name "LINC01345"; gene_source "havana"; gene_biotype "lncRNA";
+chr1	havana	gene	4175528	4175899	.	-	.	gene_id "ENSG00000229280"; gene_version "1"; gene_name "EEF1DP6"; gene_source "havana"; gene_biotype "processed_pseudogene";
+chr1	ensembl_havana	gene	10472288	10630758	.	+	.	gene_id "ENSG00000142655"; gene_version "13"; gene_name "PEX14"; gene_source "ensembl_havana"; gene_biotype "protein_coding";
+chr1	havana	gene	4571481	4594016	.	+	.	gene_id "ENSG00000232596"; gene_version "3"; gene_name "LINC01646"; gene_source "havana"; gene_biotype "lncRNA";
